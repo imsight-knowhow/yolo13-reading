@@ -1,0 +1,7 @@
+[submodule "magic-context"]
+	path = magic-context
+	url = https://github.com/igamenovoer/magic-context
+	branch = main
+[submodule "context/refcode/yolov13"]
+	path = context/refcode/yolov13
+	url = https://github.com/iMoonLab/yolov13.git
