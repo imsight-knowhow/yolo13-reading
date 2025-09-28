@@ -1,13 +1,16 @@
-# [Paper Title]
+you are tasked to read a paper and create a structured note summarizing its key aspects. Use the following template to ensure all important elements are captured. If user does not specify an output dir, save the note in dir `notes/<paper-name>/`, name the output markdown as `main-note.md`, and store any images in a subdir `figures/`. Ensure all image paths in the markdown are relative to the markdown file location.
 
-## HEADER
-- **Purpose**: Template for reading and summarizing technical papers
-- **Status**: Active
-- **Date**: 2025-09-28
-- **Dependencies**: None
-- **Target**: AI assistants and developers
+formatting guide:
+- for bulleted lists, format it like "- **Item**: description"
+
+citation guide:
+- to ground your note, include blockquote snippets from the paper with proper citations
 
 ---
+
+below is the template
+
+# [Paper Title]
 
 ## 0. Metadata
 - **Full Title**: 
@@ -121,8 +124,3 @@
 ```
 
 ---
-
-### Usage
-- Copy this template into `notes/<paper-id>.md` and fill sections.
-- Store images under `notes/<paper-id>/figures/` and reference relative paths.
-- Keep sections concise; link to the paper for long details.

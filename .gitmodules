@@ -5,3 +5,4 @@
 [submodule "context/refcode/yolov13"]
 	path = context/refcode/yolov13
 	url = https://github.com/iMoonLab/yolov13.git
+	ignore = all
