@@ -259,57 +259,34 @@ flowchart TB
   > See standard HGNN formulations using incidence matrices H, vertex/hyperedge degrees, and Laplacians. (e.g., Hypergraph Neural Networks, arXiv:1809.09401; Attention‑Based HGNN, Appl. Sci. 2024)
 
 #### Hypergraph in Yolo13 (HyperACE)
-- **Inputs (nodes)**: HyperACE first fuses multi‑scale backbone features with a small fuse module (avg‑pool down, upsample up, then 1×1 conv) to produce a mid‑scale tensor x. This is projected and split; the middle chunk y[1] (C channels) is used as the node feature map (pixels/locations are the vertices).
-  > "FuseModule … downsamples x[0], upsamples x[2], concatenates with x[1], then 1×1 Conv." (context/refcode/yolov13/ultralytics/nn/modules/block.py:1788–1810)
-- **What are ‘vertices’ in YOLOv13?** Vertices are the spatial positions (pixels/tokens) of the fused mid‑scale feature map used by HyperACE. The AdaHGComputation wrapper explicitly flattens a 4D tensor (B,C,H,W) into a sequence of vertices (tokens) of length N=H×W, runs hypergraph convolution, then reshapes back.
-  > "It flattens a 4D input tensor (B, C, H, W) into a sequence of vertices (tokens) … and then reshapes the output back into a 4D tensor." (context/refcode/yolov13/ultralytics/nn/modules/block.py:1681–1684)
-  > "tokens = x.flatten(2).transpose(1, 2)" (context/refcode/yolov13/ultralytics/nn/modules/block.py:1716)
-  - Vertices construction (pseudocode):
+- **Inputs and vertices**: Fuse B3/B4/B5 to B4 scale → 1×1 conv → split to y0|y1|y2; take y1 on B4 grid and flatten to tokens (one per spatial location). (See `FuseModule` and `AdaHGComputation`.)
+  ```mermaid
+  %%{init: { "flowchart": { "htmlLabels": false, "useMaxWidth": true } } }%%
+  flowchart LR
+    %% HyperACE inputs: B3/B4/B5 -> y1 -> tokens
+    subgraph HInputs["HyperACE Inputs"]
+      direction LR
+      B3["B3 (high-res)"] --> DS3["↓ to B4 size"]
+      B5["B5 (low-res)"]  --> US5["↑ to B4 size"]
+      B4["B4 (mid-res)"]  --> CAT
+      DS3 --> CAT["Concat (C)"]
+      US5 --> CAT
+      CAT --> CV1["1×1 Conv"]
+      CV1 --> CHK["Split channels: y0 | y1 | y2"]
+      CHK --> Y1["`y1
+      (mid chunk @ B4)`"]
+      Y1 --> FLAT["`Flatten
+      (B,C,H4,W4) -> (B,N,C)`"]
+      FLAT --> TOK["tokens (vertices)"]
+    end
+  ```
+- **Adaptive hyperedge construction**: From `X = tokens`, `AdaHyperedgeGen` builds a soft membership matrix `A ∈ R^{N×M}` by comparing tokens to context‑conditioned prototypes; each row of `A` sums to 1 (soft assignment). `AdaHGConv` then performs lightweight V→E→V message passing with a residual:
+  - Minimal sketch:
     ```python
-    # Multi-scale inputs from backbone (aligned channels):
-    # B2: (B, C, H2, W2), B3: (B, C, H3, W3), B4: (B, C, H4, W4)
-    x_fused = FuseModule([B2, B3, B4])        # -> (B, C, H3, W3)  # avgpool/upsample + concat + 1x1
-
-    y = Conv1x1(x_fused)                      # -> (B, 3C, H3, W3)
-    y0, y1, y2 = y.chunk(3, dim=1)            # -> each (B, C, H3, W3)
-    node_map = y1                              # -> (B, C, H3, W3)  # nodes live at mid-scale spatial grid
-
-    B, C, H, W = node_map.shape               # H=H3, W=W3
-    tokens = node_map.flatten(2).transpose(1, 2)  # -> (B, N, C), N = H * W   # vertices (one per spatial location)
-    # tokens now serve as vertices for AdaHGConv / HyperACE; later reshaped back to (B, C, H, W)
+    A  = softmax(sim(X, prototypes), dim=1)   # (B, N, M)
+    He = bmm(A.transpose(1, 2), X)            # (B, M, C)
+    Xout = X + bmm(A, EdgeProj(He))           # (B, N, C)
     ```
-    > Matches HyperACE ‘cv1(x).chunk(3,1)’ and AdaHGComputation flatten/transpose. (context/refcode/yolov13/ultralytics/nn/modules/block.py:1819–1825, 1716)
-- **Adaptive hyperedge construction**: Locations are flattened to tokens X∈R^{N×C}. HyperACE uses an adaptive generator to produce a soft participation matrix A∈R^{N×M} (each row sums to 1), i.e., soft assignment of vertices to M hyperedges, conditioned by global context.
-  > "AdaHyperedgeGen … generates dynamic hyperedge prototypes … returns the participation matrix A." (context/refcode/yolov13/ultralytics/nn/modules/block.py:1556–1608)
-  - Pseudocode (from AdaHyperedgeGen/AdaHGConv; shapes included):
-    ```python
-    # X: (B, N, C) vertices (tokens). Create M hyperedges with soft memberships.
-    # 1) Context-driven prototype generation
-    if context == 'mean':
-        ctx = X.mean(dim=1)                              # (B, C)
-    elif context == 'max':
-        ctx, _ = X.max(dim=1)                            # (B, C)
-    else:  # 'both'
-        ctx = cat([X.mean(1), X.max(1).values], dim=-1)  # (B, 2C)
-    offsets = Linear(ctx)                                # (B, M, C)
-    prototypes = prototype_base[None, :, :] + offsets    # (B, M, C)
-
-    # 2) Multi-head projection and similarity
-    X_proj = Linear(X)                                   # (B, N, C)
-    X_heads = X_proj.view(B, N, H, C//H).transpose(1,2) # (B, H, N, C/H)
-    P_heads = prototypes.view(B, M, H, C//H).permute(0,2,1,3) # (B, H, M, C/H)
-    logits = bmm(X_heads.reshape(B*H, N, C//H),          # (B*H, N, M)
-                 P_heads.reshape(B*H, M, C//H).transpose(1,2)) / sqrt(C/H)
-    logits = logits.view(B, H, N, M).mean(dim=1)         # (B, N, M)
-    A = softmax(dropout(logits), dim=1)                  # (B, N, M), rows sum ~1
-
-    # 3) V->E and E->V message passing (AdaHGConv)
-    He = bmm(A.transpose(1,2), X)        # (B, M, C)  aggregate vertices into hyperedges
-    He = EdgeProj(He)                    # (B, M, C)
-    X_new = bmm(A, He)                   # (B, N, C)  disseminate hyperedges back to vertices
-    X_out = NodeProj(X_new) + X          # (B, N, C)  residual update
-    ```
-    > See AdaHyperedgeGen forward and AdaHGConv forward for exact ops, including context, head split, softmax, and residual. (context/refcode/yolov13/ultralytics/nn/modules/block.py:1556–1675)
 - **Message passing (V→E→V)**: Using A, HyperACE aggregates vertex features into hyperedge features and back to vertices with lightweight projections, then adds a residual to the original node features.
   > "He = A^T X … X_new = A He … return X_new + X" (AdaHGConv forward) (context/refcode/yolov13/ultralytics/nn/modules/block.py:1625–1650)
 - **Two high‑order branches + low‑order branch**: HyperACE runs two parallel high‑order branches (C3AH) on y1 (= middle chunk) to capture high‑order correlations, and in parallel a low‑order branch (stack of DSC3k/DSBottleneck) seeded from y2 (the last chunk) for local cues; y0 (the first chunk) is preserved as a CSP‑style bypass and included only at the final concat before the 1×1 fuse.
