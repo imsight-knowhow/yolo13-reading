@@ -1,12 +1,5 @@
 # YOLOv13: Real-Time Object Detection with Hypergraph-Enhanced Adaptive Visual Perception
 
-## HEADER
-- **Purpose**: Structured reading note for YOLOv13
-- **Status**: Draft
-- **Date**: 2025-09-28
-- **Dependencies**: None
-- **Target**: Researchers and developers
-
 ---
 
 ## 0. Metadata
@@ -203,21 +196,6 @@ Backbone features are lifted to a hypergraph space where nodes (locations/scales
 
 **Visuals**
 
-- HGNN pipeline (source: Hypergraph Neural Networks, arXiv:1809.09401)
-  ![HGNN pipeline](figures/hgnn_pipeline.png)
-  - Left: input nodes with features; hypergraph construction groups nodes into hyperedges (by heuristics, similarity, or learned rules), forming the incidence matrix H.
-  - Middle: hypergraph convolutions perform two-step message passing V→E→V using H (and degrees/weights), often stacked for deeper reasoning; features update at nodes or hyperedges depending on the task.
-  - Right: task head (e.g., node classification/segmentation) produces predictions; training backpropagates through construction (if learnable) and HGNN layers.
-  > "It begins with hypergraph construction to initialize the hypergraph structure and features. Next, the hypergraph message passing block aggregates information … Then, task predictions are made …" (Recent Advances in Hypergraph Neural Networks, 2025)
-  - About the colored edges: colors indicate different hyperedge groups/modalities constructed during hypergraph building. Each color corresponds to one group of nodes linked by a particular criterion (e.g., k‑NN in one feature space vs. another modality); these groups are concatenated/fused into the final incidence/adjacency.
-    > "Multiple hyperedge structure groups are constructed from the complex correlation of the multi‑modality datasets. We concatenate the hyperedge groups to generate the hypergraph adjacent matrix H." (HGNN, arXiv:1809.09401, ‘Hypergraph neural networks analysis’)
-    > "To generate the multi‑modality hypergraph adjacent matrix we concatenate adjacent matrix of two modality." (HGNN, arXiv:1809.09401, Figure 5 caption)
-    - Example mapping (adjust to your dataset):
-      - Blue: visual similarity (k‑NN over CNN features)
-      - Orange: text similarity (k‑NN over bag‑of‑words/embeddings)
-      - Green: social/temporal co‑occurrence (session/user grouping)
-      - Purple: metadata proximity (e.g., category/tag match)
-      These colored groups are built separately, then concatenated into a single incidence matrix H used by the HGNN layers.
 
 ```mermaid
 flowchart TB
@@ -258,6 +236,23 @@ flowchart TB
   ```
   > See standard HGNN formulations using incidence matrices H, vertex/hyperedge degrees, and Laplacians. (e.g., Hypergraph Neural Networks, arXiv:1809.09401; Attention‑Based HGNN, Appl. Sci. 2024)
 
+- HGNN pipeline (source: Hypergraph Neural Networks, arXiv:1809.09401)
+  ![HGNN pipeline](figures/hgnn_pipeline.png)
+  - Left: input nodes with features; hypergraph construction groups nodes into hyperedges (by heuristics, similarity, or learned rules), forming the incidence matrix H.
+  - Middle: hypergraph convolutions perform two-step message passing V→E→V using H (and degrees/weights), often stacked for deeper reasoning; features update at nodes or hyperedges depending on the task.
+  - Right: task head (e.g., node classification/segmentation) produces predictions; training backpropagates through construction (if learnable) and HGNN layers.
+  > "It begins with hypergraph construction to initialize the hypergraph structure and features. Next, the hypergraph message passing block aggregates information … Then, task predictions are made …" (Recent Advances in Hypergraph Neural Networks, 2025)
+  - About the colored edges: colors indicate different hyperedge groups/modalities constructed during hypergraph building. Each color corresponds to one group of nodes linked by a particular criterion (e.g., k‑NN in one feature space vs. another modality); these groups are concatenated/fused into the final incidence/adjacency.
+    > "Multiple hyperedge structure groups are constructed from the complex correlation of the multi‑modality datasets. We concatenate the hyperedge groups to generate the hypergraph adjacent matrix H." (HGNN, arXiv:1809.09401, ‘Hypergraph neural networks analysis’)
+    > "To generate the multi‑modality hypergraph adjacent matrix we concatenate adjacent matrix of two modality." (HGNN, arXiv:1809.09401, Figure 5 caption)
+    - Example mapping (adjust to your dataset):
+      - Blue: visual similarity (k‑NN over CNN features)
+      - Orange: text similarity (k‑NN over bag‑of‑words/embeddings)
+      - Green: social/temporal co‑occurrence (session/user grouping)
+      - Purple: metadata proximity (e.g., category/tag match)
+      These colored groups are built separately, then concatenated into a single incidence matrix H used by the HGNN layers.
+
+
 #### Hypergraph in Yolo13 (HyperACE)
 - **Inputs and vertices**: Fuse B3/B4/B5 to B4 scale → 1×1 conv → split to y0|y1|y2; take y1 on B4 grid and flatten to tokens (one per spatial location). (See `FuseModule` and `AdaHGComputation`.)
   ```mermaid
@@ -280,16 +275,73 @@ flowchart TB
       FLAT --> TOK["tokens (vertices)"]
     end
   ```
-- **Adaptive hyperedge construction**: From `X = tokens`, `AdaHyperedgeGen` builds a soft membership matrix `A ∈ R^{N×M}` by comparing tokens to context‑conditioned prototypes; each row of `A` sums to 1 (soft assignment). `AdaHGConv` then performs lightweight V→E→V message passing with a residual:
-  - Minimal sketch:
-    ```python
-    A  = softmax(sim(X, prototypes), dim=1)   # (B, N, M)
-    He = bmm(A.transpose(1, 2), X)            # (B, M, C)
-    Xout = X + bmm(A, EdgeProj(He))           # (B, N, C)
-    ```
+- **Adaptive hyperedge construction (AdaHyperedgeGen + AdaHGConv)**: Given tokens `X ∈ R^{B×N×C}` (vertices), AdaHyperedgeGen builds context‑conditioned hyperedge prototypes and computes a multi‑head similarity between vertices and prototypes. A soft participation matrix `A ∈ R^{B×N×M}` is produced by normalizing over the vertex dimension (per hyperedge), i.e., for each hyperedge column `m`, the weights across all `N` nodes sum to 1. AdaHGConv then performs lightweight vertex→edge→vertex message passing with linear projections and a residual.
+
+  ![Figure 3: Adaptive hypergraph construction and convolution](figures/adahc.png)
+  > Details of the adaptive hypergraph construction and convolution.
+
+  Mermaid overview:
+
+  ```mermaid
+  flowchart LR
+    subgraph AdaHyperedgeGen
+      direction LR
+      X["X (B,N,C)"] --> CPool["Context pool (mean/max/both)"]
+      CPool --> CNet["context_net: R^{C_ctx}→R^{M·C}"]
+      PBase["prototype_base (M,C)"] --> POffs
+      CNet --> POffs["prototype_offsets (B,M,C)"]
+      POffs --> P["prototypes (B,M,C) = base + offs"]
+      X --> PreHead["pre_head_proj (C→C)"] --> Split["split heads (h, d=C/h)"]
+      P --> SplitP["split prototypes (h, d)"]
+      Split --> SIM["similarity per head: bmm(X_h, P_h^T)/√d"]
+      SplitP --> SIM
+      SIM --> MeanH["mean over heads"] --> Drop["dropout"] --> SoftN["softmax over N"]
+      SoftN --> A["A (B,N,M)"]
+    end
+
+    subgraph AdaHGConv
+      direction LR
+      A --> V2E["He = A^T · X  (B,M,C)"] --> EProj["edge_proj (Linear+GELU)"]
+      EProj --> E2V["X' = A · He  (B,N,C)"] --> NProj["node_proj (Linear+GELU)"]
+      X --> Res["residual add"]
+      NProj --> Res
+      Res --> Y["Y = X + NodeProj(A·EdgeProj(A^T·X))"]
+    end
+  ```
+
+  Minimal pseudocode (matches implementation in `context/refcode/yolov13/ultralytics/nn/modules/block.py`):
+
+  ```python
+  # Inputs: X: (B, N, C), M hyperedges, h = num_heads, d = C // h
+  # 1) Context-conditioned prototypes
+  ctx = cat([X.mean(dim=1), X.max(dim=1).values], dim=-1)  # if context == 'both'
+  proto_offs = context_net(ctx).view(B, M, C)              # (B, M, C)
+  prototypes = prototype_base.unsqueeze(0) + proto_offs    # (B, M, C)
+
+  # 2) Multi-head similarity and participation A
+  Xh = pre_head_proj(X).view(B, N, h, d).transpose(1, 2)           # (B,h,N,d)
+  Ph = prototypes.view(B, M, h, d).permute(0, 2, 1, 3)             # (B,h,M,d)
+  logits_h = bmm(Xh.reshape(B*h, N, d), Ph.reshape(B*h, M, d).transpose(1, 2))
+  logits = logits_h.view(B, h, N, M).mean(dim=1)                   # (B, N, M)
+  A = softmax(dropout(logits), dim=1)                               # normalize across N (per hyperedge)
+
+  # 3) Hypergraph convolution (V→E→V) with residual
+  He = bmm(A.transpose(1, 2), X)                    # (B, M, C)
+  He = EdgeProj(He)                                 # Linear+GELU
+  X_new = bmm(A, He)                                # (B, N, C)
+  Y = X + NodeProj(X_new)                           # Linear+GELU + residual
+  ```
+
+  Notes:
+  - Normalization: `softmax(dim=1)` yields per‑hyperedge normalized memberships across vertices (columns of `A` sum to 1 over `N`).
+  - Context type can be `'mean'`, `'max'`, or `'both'`; `'both'` concatenates mean and max.
+  - Complexity: bmm operations are linear in `N` for fixed `M`, avoiding quadratic self‑attention over `N×N`.
 - **Message passing (V→E→V)**: Using A, HyperACE aggregates vertex features into hyperedge features and back to vertices with lightweight projections, then adds a residual to the original node features.
   > "He = A^T X … X_new = A He … return X_new + X" (AdaHGConv forward) (context/refcode/yolov13/ultralytics/nn/modules/block.py:1625–1650)
 - **Two high‑order branches + low‑order branch**: HyperACE runs two parallel high‑order branches (C3AH) on y1 (= middle chunk) to capture high‑order correlations, and in parallel a low‑order branch (stack of DSC3k/DSBottleneck) seeded from y2 (the last chunk) for local cues; y0 (the first chunk) is preserved as a CSP‑style bypass and included only at the final concat before the 1×1 fuse.
+
+![Figure 2: YOLOv13 architecture](figures/framework.png)
+
   - Pseudocode (y0/y1/y2 usage):
     ```python
     y0, y1, y2 = Conv1x1(x_fused).chunk(3, dim=1)   # y*: (B, C, H, W)
@@ -304,52 +356,3 @@ flowchart TB
     z = Conv1x1(z)                                   # fuse to output channels
     ```
   > "branch1 = C3AH( … ); branch2 = C3AH( … ); y.extend(m(y[-1]) for m in self.m); y[1] = out1; y.append(out2); return cv2(cat(y,1))" (context/refcode/yolov13/ultralytics/nn/modules/block.py:1812–1850)
-- **Distribution (FullPAD)**: The enhanced mid‑scale feature is upsampled/downsampled to H3/H4/H5 and injected via gated residual tunnels, i.e., output = original + gate * enhanced (gate is learnable).
-  > "computes output = original + gate * enhanced" (FullPAD_Tunnel) (context/refcode/yolov13/ultralytics/nn/modules/block.py:1891,1914)
-
-- **Pseudocode (HyperACE core)**
-  ```python
-  # x: fused mid-scale feature (B,C,H,W)
-  X = flatten_spatial(x)             # (B, N, C), N=H*W
-  A = AdaHyperedgeGen(X)             # (B, N, M), soft participation per vertex
-  He = A.transpose(1,2) @ X          # (B, M, C)  # V->E aggregation
-  He = EdgeProj(He)                  # (B, M, C)
-  X_new = A @ He                     # (B, N, C)  # E->V dissemination
-  X_out = NodeProj(X_new) + X        # residual
-  y1 = reshape_back(X_out, H, W)     # (B,C,H,W)
-  out1 = C3AH(y1); out2 = C3AH(y1)   # two high-order branches
-  low = LowOrderStack(y1)            # DSC3k/DSBottleneck stack
-  y = [chunk0, y1, chunk2, *low, out2]; y[1] = out1
-  z = Conv1x1(cat(y, dim=1))         # fuse and return
-  ```
-  > Matches AdaHGConv (V→E→V with residual), HyperACE branch wiring, and final 1×1 fusion. (context/refcode/yolov13/ultralytics/nn/modules/block.py:1625–1650, 1812–1850)
-
-
-## 8. Training Setup (from paper)
-MS COCO; report across N/S/L/X model scales. Details include long‑schedule training with strong augmentation; compute not explicitly extracted here.
-
-## 15. Performance & Results
-- **Efficiency (lightweight blocks)**: Replaces large‑kernel vanilla convs with depthwise separable blocks to reduce parameters and cost while maintaining performance.
-  > "[W]e propose to leverage depthwise separable convolutions to replace vanilla large-kernel convolutions… reduce parameters and computational complexity without sacrificing performance." (Abstract; paper-soruce/yolo13/sections/1_abstract.tex)
-
-- **Empirical gains (MS COCO)**: Improves mAP over YOLO11/12 while remaining lightweight.
-  > "YOLOv13‑N/S achieve 1.5%/0.9% and 3.0%/2.2% mAP improvements compared to YOLOv12‑N/S and YOLO11‑N/S, respectively." (Introduction; paper-soruce/yolo13/sections/2_introduction.tex)
-
-## 12. Limitations, Risks, Ethics
-- **Overhead**: Hypergraph computation may add latency and memory use.
-- **Robustness**: Behavior on OOD data and very large inputs needs profiling.
-
-## 13. Applicability & Integration Notes
-- **Environment**: Use `pixi -e yolo13`; `ultralytics` APIs (e.g., `YOLO('yolov13n.pt')`).
-- **Prototype**: Insert HyperACE into a YOLO11/12 baseline; ablate FullPAD and depthwise swaps.
-
-
-## 19. BibTeX / Citation
-```bibtex
-@article{leietal_yolov13_2025,
-  title={YOLOv13: Real-Time Object Detection with Hypergraph-Enhanced Adaptive Visual Perception},
-  author={Lei, Mengqi and Li, Siqi and Wu, Yihong and Hu, Han and Zhou, You and Zheng, Xinhu and Ding, Guiguang and Du, Shaoyi and Wu, Zongze and Gao, Yue},
-  journal={arXiv preprint arXiv:2506.17733},
-  year={2025}
-}
-```
